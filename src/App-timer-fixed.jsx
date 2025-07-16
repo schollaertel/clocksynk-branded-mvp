@@ -1,0 +1,614 @@
+import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
+import { getGameService } from './lib/supabase'
+import './responsive-ads.css'
+
+function App() {
+  // Check URL for view mode and game ID
+  const urlParams = new URLSearchParams(window.location.search)
+  const urlViewMode = urlParams.get('view')
+  const urlGameId = urlParams.get('game')
+  const isSpectatorFromURL = urlViewMode === 'spectator'
+  const viewMode = isSpectatorFromURL ? 'spectator' : 'scorekeeper'
+
+  // Game state - this will be synced with server
+  const [gameState, setGameState] = useState({
+    homeScore: 0,
+    awayScore: 0,
+    period: 1,
+    clockTime: 15 * 60, // 15 minutes in seconds
+    isRunning: false,
+    penalties: {},
+    lastUpdated: Date.now()
+  })
+
+  // UI state
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState(null)
+  const [customMinutes, setCustomMinutes] = useState('')
+  const [customSeconds, setCustomSeconds] = useState('')
+  const [penaltyTeam, setPenaltyTeam] = useState('Home')
+  const [penaltyPlayer, setPenaltyPlayer] = useState('')
+  const [penaltyMinutes, setPenaltyMinutes] = useState('')
+  const [penaltySeconds, setPenaltySeconds] = useState('')
+
+  // Ad rotation states
+  const [currentTopAd, setCurrentTopAd] = useState(0)
+  const [currentFooterAd, setCurrentFooterAd] = useState(0)
+  const [currentGridSet, setCurrentGridSet] = useState(0)
+
+  // Refs
+  const syncIntervalRef = useRef(null)
+  const timerIntervalRef = useRef(null)
+  const gameId = urlGameId || process.env.REACT_APP_DEFAULT_GAME_ID || 'demo-game-1'
+  const gameService = getGameService()
+
+  // Ad content
+  const bannerAds = useMemo(() => [
+    { id: 1, text: '🥍 Elite Lacrosse Equipment - 20% Off', color: '#10B981' },
+    { id: 2, text: '🥤 Hydration Station - Team Discounts', color: '#F59E0B' },
+    { id: 3, text: '🏃 Speed Training Academy - Free Trial', color: '#3B82F6' }
+  ], [])
+
+  const footerAds = useMemo(() => [
+    { id: 1, text: 'Local Sports Store - Equipment & Gear', color: '#10B981' },
+    { id: 2, text: 'Pizza Palace - Post-Game Meals', color: '#EF4444' },
+    { id: 3, text: 'Sports Medicine - Injury Prevention', color: '#3B82F6' }
+  ], [])
+
+  const gridAds = useMemo(() => [
+    // Set 1 (6 ads)
+    { id: 1, title: 'Fitness Center', subtitle: 'Strength Training', color: '#EF4444' },
+    { id: 2, title: 'Sports Drinks', subtitle: 'Stay Hydrated', color: '#10B981' },
+    { id: 3, title: 'Team Banners', subtitle: 'Custom Design', color: '#8B5CF6' },
+    { id: 4, title: 'Lacrosse Camps', subtitle: 'Summer Programs', color: '#F59E0B' },
+    { id: 5, title: 'Sports Medicine', subtitle: 'Injury Care', color: '#3B82F6' },
+    { id: 6, title: 'Equipment Store', subtitle: 'Gear & Apparel', color: '#EC4899' },
+    // Set 2 (6 ads)
+    { id: 7, title: 'Youth Coaching', subtitle: 'Skill Development', color: '#06B6D4' },
+    { id: 8, title: 'Team Photos', subtitle: 'Professional Shots', color: '#84CC16' },
+    { id: 9, title: 'Nutrition Bar', subtitle: 'Healthy Snacks', color: '#F97316' },
+    { id: 10, title: 'Tournament Gear', subtitle: 'Competition Ready', color: '#6366F1' },
+    { id: 11, title: 'Recovery Center', subtitle: 'Post-Game Care', color: '#14B8A6' },
+    { id: 12, title: 'Fan Merchandise', subtitle: 'Show Your Spirit', color: '#F43F5E' },
+    // Set 3 (6 ads)
+    { id: 13, title: 'Training Facility', subtitle: 'Year-Round Practice', color: '#8B5CF6' },
+    { id: 14, title: 'Sports Apparel', subtitle: 'Team Uniforms', color: '#10B981' },
+    { id: 15, title: 'Video Analysis', subtitle: 'Game Footage', color: '#F59E0B' },
+    { id: 16, title: 'Referee Gear', subtitle: 'Official Equipment', color: '#EF4444' },
+    { id: 17, title: 'Field Maintenance', subtitle: 'Turf Care', color: '#3B82F6' },
+    { id: 18, title: 'Parent Portal', subtitle: 'Stay Connected', color: '#EC4899' }
+  ], [])
+
+  // Ad rotation effect
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setCurrentTopAd(prev => (prev + 1) % Math.max(1, bannerAds.length))
+      setCurrentFooterAd(prev => (prev + 1) % Math.max(1, footerAds.length))
+      setCurrentGridSet(prev => (prev + 1) % 3) // 3 sets of 6 ads
+    }, 5000) // Rotate every 5 seconds
+
+    return () => clearInterval(interval)
+  }, [bannerAds.length, footerAds.length])
+
+  // Server sync effect - this is the key fix for real-time sync
+  useEffect(() => {
+    let isMounted = true
+
+    const syncWithServer = async () => {
+      try {
+        const serverState = await gameService.getGameState(gameId)
+        if (isMounted && serverState) {
+          setGameState(serverState)
+          setError(null)
+        }
+      } catch (err) {
+        console.error('Sync error:', err)
+        if (isMounted) {
+          setError('Connection error - using local state')
+        }
+      }
+    }
+
+    // Initial sync
+    syncWithServer().finally(() => {
+      if (isMounted) {
+        setLoading(false)
+      }
+    })
+
+    // Set up real-time sync every 2 seconds
+    syncIntervalRef.current = setInterval(syncWithServer, 2000)
+
+    return () => {
+      isMounted = false
+      if (syncIntervalRef.current) {
+        clearInterval(syncIntervalRef.current)
+        syncIntervalRef.current = null
+      }
+    }
+  }, [gameId, gameService])
+
+  // Timer effect - FIXED VERSION - only runs on scorekeeper
+  useEffect(() => {
+    // Clear any existing timer
+    if (timerIntervalRef.current) {
+      clearInterval(timerIntervalRef.current)
+      timerIntervalRef.current = null
+    }
+
+    // Only start timer if running and in scorekeeper mode
+    if (gameState.isRunning && viewMode === 'scorekeeper') {
+      timerIntervalRef.current = setInterval(() => {
+        setGameState(prevState => {
+          // Don't update if timer is not running anymore
+          if (!prevState.isRunning) {
+            return prevState
+          }
+
+          const newTime = Math.max(0, prevState.clockTime - 1)
+          const newState = {
+            ...prevState,
+            clockTime: newTime,
+            lastUpdated: Date.now()
+          }
+
+          // Update penalties
+          const updatedPenalties = { ...prevState.penalties }
+          let penaltiesChanged = false
+
+          Object.keys(updatedPenalties).forEach(id => {
+            const penalty = updatedPenalties[id]
+            const newPenaltyTime = Math.max(0, penalty.remainingTime - 1)
+            
+            if (newPenaltyTime <= 0) {
+              delete updatedPenalties[id]
+              penaltiesChanged = true
+            } else if (penalty.remainingTime !== newPenaltyTime) {
+              updatedPenalties[id] = { ...penalty, remainingTime: newPenaltyTime }
+              penaltiesChanged = true
+            }
+          })
+
+          if (penaltiesChanged) {
+            newState.penalties = updatedPenalties
+          }
+
+          // Auto-stop timer if time runs out
+          if (newTime <= 0 && prevState.isRunning) {
+            newState.isRunning = false
+          }
+
+          // Update server with new state (async, don't wait)
+          gameService.updateGameState(gameId, newState).catch(error => {
+            console.error('Error updating server state:', error)
+          })
+
+          return newState
+        })
+      }, 1000)
+    }
+
+    return () => {
+      if (timerIntervalRef.current) {
+        clearInterval(timerIntervalRef.current)
+        timerIntervalRef.current = null
+      }
+    }
+  }, [gameState.isRunning, viewMode, gameId, gameService])
+
+  // Helper functions
+  const formatTime = useCallback((seconds) => {
+    const mins = Math.floor(seconds / 60)
+    const secs = seconds % 60
+    return `${mins}:${secs.toString().padStart(2, '0')}`
+  }, [])
+
+  const updateGameState = useCallback(async (updates) => {
+    if (viewMode !== 'scorekeeper') return
+
+    try {
+      const newState = { ...gameState, ...updates, lastUpdated: Date.now() }
+      setGameState(newState)
+      await gameService.updateGameState(gameId, newState)
+      setError(null)
+    } catch (err) {
+      console.error('Error updating game state:', err)
+      setError('Failed to update - changes may not sync')
+    }
+  }, [gameState, gameId, gameService, viewMode])
+
+  // Game control functions
+  const startTimer = useCallback(() => {
+    updateGameState({ isRunning: true })
+  }, [updateGameState])
+
+  const pauseTimer = useCallback(() => {
+    updateGameState({ isRunning: false })
+  }, [updateGameState])
+
+  const resetTimer = useCallback(() => {
+    updateGameState({
+      clockTime: 15 * 60,
+      isRunning: false,
+      penalties: {}
+    })
+  }, [updateGameState])
+
+  const setCustomTime = useCallback(() => {
+    const minutes = parseInt(customMinutes) || 0
+    const seconds = parseInt(customSeconds) || 0
+    const totalSeconds = minutes * 60 + seconds
+    
+    if (totalSeconds > 0) {
+      updateGameState({ clockTime: totalSeconds, isRunning: false })
+      setCustomMinutes('')
+      setCustomSeconds('')
+    }
+  }, [customMinutes, customSeconds, updateGameState])
+
+  const adjustScore = useCallback((team, delta) => {
+    const key = team === 'home' ? 'homeScore' : 'awayScore'
+    const newScore = Math.max(0, gameState[key] + delta)
+    updateGameState({ [key]: newScore })
+  }, [gameState, updateGameState])
+
+  const adjustPeriod = useCallback((delta) => {
+    const newPeriod = Math.max(1, gameState.period + delta)
+    updateGameState({ period: newPeriod })
+  }, [gameState.period, updateGameState])
+
+  const addPenalty = useCallback(() => {
+    if (!penaltyPlayer || (!penaltyMinutes && !penaltySeconds)) return
+
+    const minutes = parseInt(penaltyMinutes) || 0
+    const seconds = parseInt(penaltySeconds) || 0
+    const totalSeconds = minutes * 60 + seconds
+
+    if (totalSeconds > 0) {
+      const penaltyId = `${Date.now()}-${Math.random()}`
+      const newPenalty = {
+        id: penaltyId,
+        team: penaltyTeam,
+        player: penaltyPlayer,
+        remainingTime: totalSeconds,
+        originalTime: totalSeconds
+      }
+
+      const updatedPenalties = {
+        ...gameState.penalties,
+        [penaltyId]: newPenalty
+      }
+
+      updateGameState({ penalties: updatedPenalties })
+      
+      // Clear form
+      setPenaltyPlayer('')
+      setPenaltyMinutes('')
+      setPenaltySeconds('')
+    }
+  }, [penaltyTeam, penaltyPlayer, penaltyMinutes, penaltySeconds, gameState.penalties, updateGameState])
+
+  const removePenalty = useCallback((penaltyId) => {
+    const updatedPenalties = { ...gameState.penalties }
+    delete updatedPenalties[penaltyId]
+    updateGameState({ penalties: updatedPenalties })
+  }, [gameState.penalties, updateGameState])
+
+  // Get current ads to display
+  const currentBannerAd = bannerAds[currentTopAd] || bannerAds[0]
+  const currentFooterBannerAd = footerAds[currentFooterAd] || footerAds[0]
+  const currentGridAds = gridAds.slice(currentGridSet * 6, (currentGridSet + 1) * 6)
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-gray-900 flex items-center justify-center">
+        <div className="text-white text-xl">Loading ClockSynk...</div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="min-h-screen bg-gray-900 text-white">
+      {/* Header */}
+      <header className="bg-gray-800 p-4 flex justify-between items-center">
+        <div className="flex items-center space-x-3">
+          <div className="w-10 h-10 bg-green-500 rounded-lg flex items-center justify-center font-bold text-black">
+            CS
+          </div>
+          <div>
+            <h1 className="text-xl font-bold">ClockSynk</h1>
+            <p className="text-sm text-gray-400">Youth Sports Scoreboard</p>
+          </div>
+        </div>
+        
+        <div className="flex space-x-2">
+          <button className="px-4 py-2 bg-gray-700 rounded-lg flex items-center space-x-2">
+            <span>👁️</span>
+            <span>Spectator</span>
+          </button>
+          <button className="px-4 py-2 bg-green-600 rounded-lg flex items-center space-x-2">
+            <span>⚙️</span>
+            <span>Scorekeeper</span>
+          </button>
+        </div>
+      </header>
+
+      {/* Error message */}
+      {error && (
+        <div className="bg-red-600 text-white p-2 text-center">
+          {error}
+        </div>
+      )}
+
+      {/* Spectator Access */}
+      {viewMode === 'scorekeeper' && (
+        <div className="bg-gray-800 p-4">
+          <div className="flex items-center space-x-2 text-sm">
+            <span>📱</span>
+            <span className="font-semibold">Spectator Access</span>
+          </div>
+          <p className="text-xs text-gray-400 mt-1">Share this URL for spectator view</p>
+          <div className="mt-2 p-2 bg-gray-700 rounded text-xs font-mono">
+            {window.location.origin}?view=spectator&game={gameId}
+          </div>
+        </div>
+      )}
+
+      {/* Top Banner Ad */}
+      <div 
+        className="p-4 text-center font-semibold text-lg transition-colors duration-500"
+        style={{ backgroundColor: currentBannerAd?.color || '#10B981' }}
+      >
+        {currentBannerAd?.text || 'Loading...'}
+      </div>
+
+      {/* Main Scoreboard */}
+      <div className="p-6">
+        <div className="grid grid-cols-3 gap-6 items-center max-w-4xl mx-auto">
+          {/* HOME */}
+          <div className="text-center">
+            <h2 className="text-2xl font-bold text-green-400 mb-2">HOME</h2>
+            <div className="text-6xl font-bold mb-4">{gameState.homeScore}</div>
+            {viewMode === 'scorekeeper' && (
+              <div className="flex justify-center space-x-2">
+                <button 
+                  onClick={() => adjustScore('home', 1)}
+                  className="w-12 h-12 bg-green-600 rounded-lg text-xl font-bold hover:bg-green-700"
+                >
+                  +
+                </button>
+                <button 
+                  onClick={() => adjustScore('home', -1)}
+                  className="w-12 h-12 bg-red-600 rounded-lg text-xl font-bold hover:bg-red-700"
+                >
+                  -
+                </button>
+              </div>
+            )}
+          </div>
+
+          {/* CENTER - Period and Timer */}
+          <div className="text-center">
+            <div className="mb-4">
+              <h3 className="text-lg font-semibold text-orange-400 mb-2">PERIOD</h3>
+              <div className="flex items-center justify-center space-x-2">
+                {viewMode === 'scorekeeper' && (
+                  <button 
+                    onClick={() => adjustPeriod(-1)}
+                    className="w-8 h-8 bg-orange-600 rounded text-sm font-bold hover:bg-orange-700"
+                  >
+                    -
+                  </button>
+                )}
+                <div className="text-3xl font-bold">{gameState.period}</div>
+                {viewMode === 'scorekeeper' && (
+                  <button 
+                    onClick={() => adjustPeriod(1)}
+                    className="w-8 h-8 bg-orange-600 rounded text-sm font-bold hover:bg-orange-700"
+                  >
+                    +
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {/* Timer */}
+            <div className="text-5xl font-bold mb-4">{formatTime(gameState.clockTime)}</div>
+
+            {/* Timer Controls */}
+            {viewMode === 'scorekeeper' && (
+              <div className="space-y-3">
+                {/* Custom Time */}
+                <div className="flex justify-center items-center space-x-2">
+                  <input
+                    type="number"
+                    placeholder="Min"
+                    value={customMinutes}
+                    onChange={(e) => setCustomMinutes(e.target.value)}
+                    className="w-16 px-2 py-1 bg-gray-700 rounded text-center"
+                    min="0"
+                    max="99"
+                  />
+                  <span>:</span>
+                  <input
+                    type="number"
+                    placeholder="Sec"
+                    value={customSeconds}
+                    onChange={(e) => setCustomSeconds(e.target.value)}
+                    className="w-16 px-2 py-1 bg-gray-700 rounded text-center"
+                    min="0"
+                    max="59"
+                  />
+                  <button 
+                    onClick={setCustomTime}
+                    className="px-3 py-1 bg-blue-600 rounded text-sm hover:bg-blue-700"
+                  >
+                    Set
+                  </button>
+                </div>
+
+                {/* Play/Pause and Reset */}
+                <div className="flex justify-center space-x-3">
+                  <button 
+                    onClick={gameState.isRunning ? pauseTimer : startTimer}
+                    className={`px-6 py-2 rounded-lg font-semibold ${
+                      gameState.isRunning 
+                        ? 'bg-orange-600 hover:bg-orange-700' 
+                        : 'bg-green-600 hover:bg-green-700'
+                    }`}
+                  >
+                    {gameState.isRunning ? '⏸️ Pause' : '▶️ Play'}
+                  </button>
+                  <button 
+                    onClick={resetTimer}
+                    className="px-6 py-2 bg-red-600 rounded-lg font-semibold hover:bg-red-700"
+                  >
+                    🔄 Reset
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* AWAY */}
+          <div className="text-center">
+            <h2 className="text-2xl font-bold text-red-400 mb-2">AWAY</h2>
+            <div className="text-6xl font-bold mb-4">{gameState.awayScore}</div>
+            {viewMode === 'scorekeeper' && (
+              <div className="flex justify-center space-x-2">
+                <button 
+                  onClick={() => adjustScore('away', 1)}
+                  className="w-12 h-12 bg-green-600 rounded-lg text-xl font-bold hover:bg-green-700"
+                >
+                  +
+                </button>
+                <button 
+                  onClick={() => adjustScore('away', -1)}
+                  className="w-12 h-12 bg-red-600 rounded-lg text-xl font-bold hover:bg-red-700"
+                >
+                  -
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Penalties Section */}
+      <div className="px-6 pb-6">
+        <div className="max-w-4xl mx-auto">
+          <div className="flex items-center space-x-2 mb-3">
+            <span>⚠️</span>
+            <h3 className="text-xl font-bold">Penalties</h3>
+          </div>
+
+          {/* Active Penalties */}
+          <div className="mb-4">
+            {Object.keys(gameState.penalties).length === 0 ? (
+              <p className="text-gray-400 italic">No active penalties</p>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                {Object.values(gameState.penalties).map((penalty) => (
+                  <div key={penalty.id} className="bg-gray-800 p-3 rounded-lg">
+                    <div className="flex justify-between items-start">
+                      <div>
+                        <div className="font-semibold">{penalty.team} #{penalty.player}</div>
+                        <div className="text-sm text-gray-400">
+                          {formatTime(penalty.remainingTime)} remaining
+                        </div>
+                      </div>
+                      {viewMode === 'scorekeeper' && (
+                        <button 
+                          onClick={() => removePenalty(penalty.id)}
+                          className="text-red-400 hover:text-red-300 text-sm"
+                        >
+                          ✕
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Add Penalty */}
+          {viewMode === 'scorekeeper' && (
+            <div className="bg-gray-800 p-4 rounded-lg">
+              <div className="flex flex-wrap items-center gap-3">
+                <select 
+                  value={penaltyTeam}
+                  onChange={(e) => setPenaltyTeam(e.target.value)}
+                  className="px-3 py-2 bg-gray-700 rounded"
+                >
+                  <option value="Home">Home</option>
+                  <option value="Away">Away</option>
+                </select>
+                <input
+                  type="text"
+                  placeholder="#"
+                  value={penaltyPlayer}
+                  onChange={(e) => setPenaltyPlayer(e.target.value)}
+                  className="w-16 px-2 py-2 bg-gray-700 rounded text-center"
+                />
+                <input
+                  type="number"
+                  placeholder="Min"
+                  value={penaltyMinutes}
+                  onChange={(e) => setPenaltyMinutes(e.target.value)}
+                  className="w-16 px-2 py-2 bg-gray-700 rounded text-center"
+                  min="0"
+                  max="99"
+                />
+                <input
+                  type="number"
+                  placeholder="Sec"
+                  value={penaltySeconds}
+                  onChange={(e) => setPenaltySeconds(e.target.value)}
+                  className="w-16 px-2 py-2 bg-gray-700 rounded text-center"
+                  min="0"
+                  max="59"
+                />
+                <button 
+                  onClick={addPenalty}
+                  className="px-4 py-2 bg-orange-600 rounded font-semibold hover:bg-orange-700"
+                >
+                  Add
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Grid Ads */}
+      <div className="px-6 pb-6">
+        <div className="max-w-4xl mx-auto">
+          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-3 gap-4">
+            {currentGridAds.map((ad) => (
+              <div 
+                key={ad.id}
+                className="p-4 rounded-lg text-center transition-colors duration-500"
+                style={{ backgroundColor: ad.color }}
+              >
+                <div className="font-bold text-lg">{ad.title}</div>
+                <div className="text-sm opacity-90">{ad.subtitle}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* Footer Banner Ad */}
+      <div 
+        className="p-4 text-center font-semibold text-lg transition-colors duration-500"
+        style={{ backgroundColor: currentFooterBannerAd?.color || '#10B981' }}
+      >
+        {currentFooterBannerAd?.text || 'Loading...'}
+      </div>
+    </div>
+  )
+}
+
+export default App
+
